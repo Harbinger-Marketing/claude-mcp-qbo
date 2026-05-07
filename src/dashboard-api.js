@@ -41,20 +41,52 @@ function cacheSet(key, value) {
   }
 }
 
-// ─── Auth middleware: x-api-key header must match DASHBOARD_API_KEY ───────
+// ─── Auth middleware: x-api-key header must match a registered key ───────
+// Multi-tenant pattern. Each consuming dashboard gets its own env-var
+// so they can be rotated independently. The map's keys are friendly
+// labels surfaced in audit logs (e.g. when commissions-dashboard hits
+// /api/expenses, the request log records that tenant). Add new
+// consumers by adding new entries here + the matching env var on Railway.
+function getValidApiKeys() {
+  const keys = {};
+  // Primary key — used by the Harbinger Finance Dashboard.
+  if (process.env.DASHBOARD_API_KEY) {
+    keys['harbinger-dashboard'] = process.env.DASHBOARD_API_KEY;
+  }
+  // Sales-commissions dashboard. Issued separately so we can rotate
+  // without disrupting the main dashboard's traffic.
+  if (process.env.DASHBOARD_API_KEY_COMMISSIONS) {
+    keys['commissions-dashboard'] = process.env.DASHBOARD_API_KEY_COMMISSIONS;
+  }
+  return keys;
+}
+
 function requireDashboardKey(req, res, next) {
-  const expected = process.env.DASHBOARD_API_KEY;
-  if (!expected) {
+  const keys = getValidApiKeys();
+  if (Object.keys(keys).length === 0) {
     return res.status(500).json({
-      error: 'DASHBOARD_API_KEY is not configured on the server.',
+      error: 'No DASHBOARD_API_KEY* env vars are configured on the server.',
     });
   }
   const provided = req.headers['x-api-key'];
-  if (!provided || provided !== expected) {
+  if (!provided) {
     return res.status(401).json({
       error: 'Unauthorized — valid x-api-key header required.',
     });
   }
+  // Find which registered key matched, so audit logs can show who's
+  // calling. Constant-time comparison would be nicer here for the
+  // paranoid; for an internal tool with two trusted consumers, the
+  // simple equality check is fine.
+  const tenant = Object.keys(keys).find((k) => keys[k] === provided);
+  if (!tenant) {
+    return res.status(401).json({
+      error: 'Unauthorized — valid x-api-key header required.',
+    });
+  }
+  req.apiKeyTenant = tenant;
+  // One-line audit log so usage is visible in Railway's logs.
+  console.log(`[dashboard-api] ${req.method} ${req.path} · tenant=${tenant}`);
   next();
 }
 

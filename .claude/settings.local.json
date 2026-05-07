@@ -13,7 +13,12 @@
       "Bash(node --check src/mcp-auth.js)",
       "Bash(node -e \"import pkg from '@modelcontextprotocol/sdk/package.json' with { type: 'json' }; console.log\\('MCP SDK version:', pkg.default.version\\);\")",
       "Bash(npm view:*)",
-      "Bash(node test-mcp.mjs)"
+      "Bash(node test-mcp.mjs)",
+      "WebFetch(domain:docs.railway.com)",
+      "Bash(node --check src/railway.js)",
+      "Bash(curl -s --max-time 10 https://claude-mcp-qbo-production.up.railway.app/health)",
+      "Bash(curl -s --max-time 15 https://claude-mcp-qbo-production.up.railway.app/health)",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }
