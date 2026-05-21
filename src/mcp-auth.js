@@ -126,16 +126,49 @@ export function exchangeCodeForToken(body) {
 
 // ── Token Validation ──
 
-export function validateBearerToken(authHeader) {
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
+// Multi-tenant API key registry. The legacy MCP_API_KEY env var still works
+// (mapped to tenant="owner"); additional keys are picked up from any env var
+// matching MCP_API_KEY_<TENANT> so new consumers can be added by setting an
+// env var on Railway with no code change required.
+//
+// Pattern intentionally mirrors the Vercel /api/ar-aging multi-tenant
+// scheme (getServiceApiKeys in api/ar-aging.js) — separate keys per tenant
+// so audit logs attribute traffic correctly and revocation is one-off.
+function getValidApiKeys() {
+  const keys = {};
+  if (process.env.MCP_API_KEY) {
+    keys[process.env.MCP_API_KEY] = 'owner';
+  }
+  // Enumerate per-tenant keys: MCP_API_KEY_MITCHELL → "mitchell", etc.
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!name.startsWith('MCP_API_KEY_')) continue;
+    if (!value) continue;
+    const tenant = name.slice('MCP_API_KEY_'.length).toLowerCase();
+    if (!tenant) continue;
+    keys[value] = tenant;
+  }
+  return keys;
+}
+
+// Returns the tenant name (string) if the token is valid, or null otherwise.
+// Bearer-token validation surface kept boolean-compatible via validateBearerToken
+// below — most callers only need the yes/no answer.
+export function resolveBearerToken(authHeader) {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
 
-  // Accept if it matches the static MCP_API_KEY (backward compat)
-  const apiKey = process.env.MCP_API_KEY;
-  if (apiKey && token === apiKey) return true;
+  // Static API keys (owner + tenants)
+  const keys = getValidApiKeys();
+  if (keys[token]) return keys[token];
 
-  // Accept if it's an OAuth-issued token
-  return validTokens.has(token);
+  // OAuth-issued tokens — owner-equivalent scope
+  if (validTokens.has(token)) return 'owner';
+
+  return null;
+}
+
+export function validateBearerToken(authHeader) {
+  return resolveBearerToken(authHeader) !== null;
 }
 
 // ── Metadata Builders ──
