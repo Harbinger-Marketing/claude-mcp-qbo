@@ -149,6 +149,35 @@ async function qboGet(path, params = {}) {
   return res.data;
 }
 
+// ─── Low-level QBO POST helper ────────────────────────────────────────────
+// Used for sparse updates (e.g. renaming a customer). Wraps the same
+// token-refresh + error-forwarding machinery as qboGet.
+async function qboPost(path, body, params = {}) {
+  const { accessToken, realmId } = await ensureValidToken();
+  const url = `${QBO_BASE_URL}/${realmId}${path}`;
+  const res = await axios.post(url, body, {
+    params,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    validateStatus: (s) => s < 500,
+  });
+  if (res.status >= 400) {
+    const resBody = res.data;
+    const msg =
+      resBody?.Fault?.Error?.[0]?.Message ||
+      resBody?.Fault?.Error?.[0]?.Detail ||
+      `QBO ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.qbo = resBody;
+    throw err;
+  }
+  return res.data;
+}
+
 function handleError(routeName, err, res) {
   const status = err.status || err.response?.status || 500;
   console.error(`[${routeName}] ${status}: ${err.message}`);
@@ -329,6 +358,82 @@ export function createDashboardRouter() {
       res.json(data);
     } catch (err) {
       handleError('/api/query', err, res);
+    }
+  });
+
+  // ── POST /api/customers/:id/rename — rename a QBO customer ──
+  // Body: { displayName: string }
+  // Performs a sparse-update against the QBO Customer entity, preserving
+  // every other field. We fetch the current SyncToken just-in-time so the
+  // caller doesn't need to track it. Used by the harbinger-dashboard
+  // partner-reconciliation batch (PR-U3.3).
+  router.post('/customers/:id/rename', async (req, res) => {
+    const cacheBust = () => {
+      // Invalidate any cached /query results that mention Customer rows
+      for (const key of Array.from(cache.keys())) {
+        if (key.startsWith('query:') && /\bCustomer\b/i.test(key)) {
+          cache.delete(key);
+        }
+      }
+    };
+    try {
+      const id = String(req.params.id || '').trim();
+      const newName = (req.body && req.body.displayName) || '';
+      if (!id) {
+        return res.status(400).json({ error: 'customer id is required in URL' });
+      }
+      if (!newName || typeof newName !== 'string') {
+        return res
+          .status(400)
+          .json({ error: 'displayName (string) is required in body' });
+      }
+      if (newName.length > 100) {
+        // QBO DisplayName max is 100 chars
+        return res
+          .status(400)
+          .json({ error: 'displayName cannot exceed 100 characters' });
+      }
+
+      // Step 1: fetch current SyncToken (mandatory for any QBO update)
+      const current = await qboGet('/query', {
+        query: `SELECT Id, DisplayName, SyncToken FROM Customer WHERE Id = '${id}'`,
+        minorversion: '75',
+      });
+      const cust =
+        current?.QueryResponse?.Customer && current.QueryResponse.Customer[0];
+      if (!cust) {
+        return res
+          .status(404)
+          .json({ error: `Customer ${id} not found in QBO` });
+      }
+
+      // Step 2: sparse update — only changes DisplayName, preserves rest
+      const updated = await qboPost(
+        '/customer',
+        {
+          sparse: true,
+          Id: cust.Id,
+          SyncToken: cust.SyncToken,
+          DisplayName: newName,
+        },
+        { minorversion: '75' },
+      );
+
+      cacheBust();
+
+      const updatedCust = updated?.Customer || updated?.QueryResponse?.Customer;
+      console.log(
+        `[/api/customers/${id}/rename] '${cust.DisplayName}' → '${newName}'`,
+      );
+      return res.json({
+        success: true,
+        id,
+        previousName: cust.DisplayName,
+        newName,
+        customer: updatedCust || null,
+      });
+    } catch (err) {
+      handleError(`/api/customers/${req.params.id}/rename`, err, res);
     }
   });
 
